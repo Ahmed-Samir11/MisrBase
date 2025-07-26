@@ -208,13 +208,6 @@ This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md
 - **Creative Tim** - React template design system
 - **Hugging Face** - Pre-trained language models
 - **Open Source Community** - Contributing to educational technology
-
-## 📞 Contact
-
-- **Project Link**: [https://github.com/yourusername/MisrBase](https://github.com/yourusername/MisrBase)
-- **Email**: contact@misrbase.edu
-- **Website**: [https://misrbase.edu](https://misrbase.edu)
-
 ---
 
 **MisrBase** - Building Egypt's Future through AI-Powered Education 🎓🇪🇬
