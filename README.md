@@ -67,11 +67,11 @@ pip install -r requirements.txt
 # Copy environment file
 cp env.example .env
 
-# Edit .env with your configuration
-# Update model names and other settings
+# Edit .env with your configuration (optional)
+# The backend automatically loads models from Hugging Face
 
 # Start the server
-python start.py
+python start_server.py
 ```
 
 The API will be available at `http://localhost:5000`

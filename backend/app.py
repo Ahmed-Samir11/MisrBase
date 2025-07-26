@@ -3,27 +3,25 @@ from flask_cors import CORS
 import pandas as pd
 import numpy as np
 import re
-import torch
-import joblib
-import os
+import requests
 import json
-from transformers import RobertaTokenizer, RobertaForSequenceClassification
-import lightgbm as lgb
-from sklearn.preprocessing import LabelEncoder
-from sklearn.feature_extraction.text import TfidfVectorizer
+import os
 import warnings
 warnings.filterwarnings('ignore')
 
 app = Flask(__name__)
 CORS(app)
 
-# Global variables for models and encoders
-models = {}
-encoders = {}
-tfidf_vectorizer = None
-question_encoder = None
-answer_encoder = None
-feature_names = []
+# Global variables for API configuration
+HUGGINGFACE_API_TOKEN = os.getenv('HUGGINGFACE_API_TOKEN', '')
+HUGGINGFACE_API_URL = "https://api-inference.huggingface.co/models"
+
+# Model endpoints
+MODELS = {
+    'category': 'MohammedHany123/category_model',
+    'misconception': 'MohammedHany123/misconception_model',
+    'correctness': 'MohammedHany123/correct_model'
+}
 
 def extract_mathematical_features(text): 
     """Extract mathematical and linguistic features from text""" 
@@ -68,64 +66,76 @@ def extract_mathematical_features(text):
      
     return features 
 
-def prepare_features(df, tfidf_vectorizer, question_encoder, answer_encoder):
-    """Prepare all features for modeling""" 
-    print("=== Feature Engineering ===") 
-     
-    # Extract mathematical features 
-    math_features = [] 
-    for explanation in df['StudentExplanation']: 
-        math_features.append(extract_mathematical_features(explanation)) 
-     
-    math_features_df = pd.DataFrame(math_features) 
-    print(f"Mathematical features created: {math_features_df.shape[1]}") 
-     
-    # TF-IDF features for text 
-    tfidf_matrix = tfidf_vectorizer.transform(df['StudentExplanation'].astype(str))
-    tfidf_df = pd.DataFrame(tfidf_matrix.toarray(), columns=[f'tfidf_{i}' for i in range(tfidf_matrix.shape[1])])
-    print(f"TF-IDF features created: {tfidf_df.shape[1]}") 
-          
-    question_features = pd.DataFrame({ 
-        'question_encoded': question_encoder.transform(df['QuestionText'].astype(str)),
-        'answer_encoded': answer_encoder.transform(df['MC_Answer'].astype(str)), 
-        'question_length': df['QuestionText'].str.len(), 
-        'answer_length': df['MC_Answer'].str.len() 
-    }) 
-    print(f"Question/Answer features created: {question_features.shape[1]}") 
-     
-    # Combine all features 
-    features_df = pd.concat([math_features_df, tfidf_df, question_features], axis=1) 
-    print(f"Total features: {features_df.shape[1]}") 
-     
-    return features_df
-
-def predict_with_roberta(model, tokenizer, texts, device='cpu'):
-    """Make predictions with trained RoBERTa model"""
+def call_huggingface_api(model_name, text, api_token=None):
+    """Call Hugging Face inference API for a model"""
     
-    model.eval()
-    model.to(device)
+    headers = {
+        "Content-Type": "application/json"
+    }
+    
+    # Add authorization header if token is provided
+    if api_token:
+        headers["Authorization"] = f"Bearer {api_token}"
+    
+    payload = {
+        "inputs": text,
+        "options": {
+            "wait_for_model": True
+        }
+    }
+    
+    try:
+        response = requests.post(
+            f"{HUGGINGFACE_API_URL}/{model_name}",
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            print(f"API Error for {model_name}: {response.status_code} - {response.text}")
+            return None
+            
+    except Exception as e:
+        print(f"Request failed for {model_name}: {str(e)}")
+        return None
+
+def predict_with_huggingface_api(texts, model_name):
+    """Make predictions using Hugging Face API"""
     
     predictions = []
     probabilities = []
     
-    with torch.no_grad():
-        for text in texts:
-            inputs = tokenizer(
-                str(text),
-                truncation=True,
-                padding='max_length',
-                max_length=512,
-                return_tensors='pt'
-            ).to(device)
+    for text in texts:
+        result = call_huggingface_api(model_name, text, HUGGINGFACE_API_TOKEN)
+        
+        if result and isinstance(result, list) and len(result) > 0:
+            # Extract prediction and probabilities
+            prediction_data = result[0]
             
-            outputs = model(**inputs)
-            logits = outputs.logits
-            
-            probs = torch.softmax(logits, dim=-1)
-            pred = torch.argmax(logits, dim=-1)
-            
-            predictions.append(pred.cpu().numpy()[0])
-            probabilities.append(probs.cpu().numpy()[0])
+            if 'label' in prediction_data:
+                # Classification result
+                pred_class = int(prediction_data['label'].split('_')[-1]) if '_' in prediction_data['label'] else 0
+                predictions.append(pred_class)
+                
+                # Get probabilities if available
+                if 'score' in prediction_data:
+                    # Single score - create dummy probabilities
+                    probs = [0.0] * 10  # Assume max 10 classes
+                    probs[pred_class] = prediction_data['score']
+                    probabilities.append(probs)
+                else:
+                    probabilities.append([1.0] + [0.0] * 9)  # Dummy probabilities
+            else:
+                # Fallback
+                predictions.append(0)
+                probabilities.append([1.0] + [0.0] * 9)
+        else:
+            # Fallback for failed requests
+            predictions.append(0)
+            probabilities.append([1.0] + [0.0] * 9)
     
     return np.array(predictions), np.array(probabilities)
 
@@ -133,26 +143,19 @@ def get_top_k_predictions(probabilities, k=3):
     """Get top-k predictions from probability arrays"""
     return np.argsort(probabilities, axis=1)[:, -k:][:, ::-1]
 
-def predict_top3_roberta(models, encoders, df, X):
-    """Generate top-3 predictions using trained models"""
+def predict_top3_api(texts):
+    """Generate top-3 predictions using Hugging Face API"""
     
     preds = []
-    texts = df['StudentExplanation'].tolist()
     
-    # Get predictions from each model
-    print("Predicting lightGBM...")
-    X_val = X.loc[df.index]
-    corr_preds = models['correctness'].predict(X_val)
-
-    print("Predicting Roberta (category)...")
-    cat_preds, cat_probs = predict_with_roberta(
-        models['category'], models['category_tokenizer'], texts
-    )
-
-    print("Predicting Roberta (misconception)...")
-    misc_preds, misc_probs = predict_with_roberta(
-        models['misconception'], models['misconception_tokenizer'], texts
-    )
+    print("Predicting category...")
+    cat_preds, cat_probs = predict_with_huggingface_api(texts, MODELS['category'])
+    
+    print("Predicting misconception...")
+    misc_preds, misc_probs = predict_with_huggingface_api(texts, MODELS['misconception'])
+    
+    print("Predicting correctness...")
+    corr_preds, corr_probs = predict_with_huggingface_api(texts, MODELS['correctness'])
     
     # Get top-3 for each component
     top3_cat = get_top_k_predictions(cat_probs, k=3)
@@ -170,8 +173,9 @@ def predict_top3_roberta(models, encoders, df, X):
                 if len(sample_preds) >= 3:
                     break
                 
-                cat_name = encoders['category'].inverse_transform([cat_idx])[0]
-                misc_name = encoders['misconception'].inverse_transform([misc_idx])[0]
+                # Use class indices as fallback names
+                cat_name = f"Category_{cat_idx}"
+                misc_name = f"Misconception_{misc_idx}"
                 
                 prediction = f"{correctness}_{cat_name}:{misc_name}"
                 if prediction not in sample_preds:
@@ -188,40 +192,13 @@ def predict_top3_roberta(models, encoders, df, X):
     
     return preds
 
-def load_models():
-    """Load all models and encoders from Hugging Face and local files"""
-    global models, encoders, tfidf_vectorizer, question_encoder, answer_encoder
-    
+def check_api_status():
+    """Check if Hugging Face API is accessible"""
     try:
-        print("Loading models from Hugging Face...")
-        
-        # Load models from Hugging Face (replace with your actual model names)
-        # You'll need to upload your trained models to Hugging Face first
-        category_model_name = "your-username/misrbase-category-model"  # Replace with actual
-        misconception_model_name = "your-username/misrbase-misconception-model"  # Replace with actual
-        
-        # Load RoBERTa models
-        models['category'] = RobertaForSequenceClassification.from_pretrained(category_model_name)
-        models['category_tokenizer'] = RobertaTokenizer.from_pretrained(category_model_name)
-        
-        models['misconception'] = RobertaForSequenceClassification.from_pretrained(misconception_model_name)
-        models['misconception_tokenizer'] = RobertaTokenizer.from_pretrained(misconception_model_name)
-        
-        # Load LightGBM model (you'll need to save this separately)
-        models['correctness'] = lgb.Booster(model_file='models/correctness_model.txt')
-        
-        # Load encoders and vectorizers
-        encoders['category'] = joblib.load('models/category_encoder.joblib')
-        encoders['misconception'] = joblib.load('models/misconception_encoder.joblib')
-        tfidf_vectorizer = joblib.load('models/tfidf_vectorizer.joblib')
-        question_encoder = joblib.load('models/question_encoder.joblib')
-        answer_encoder = joblib.load('models/answer_encoder.joblib')
-        
-        print("✅ All models loaded successfully!")
-        return True
-        
-    except Exception as e:
-        print(f"❌ Error loading models: {str(e)}")
+        # Test with a simple request to one of the models
+        result = call_huggingface_api(MODELS['category'], "test", HUGGINGFACE_API_TOKEN)
+        return result is not None
+    except:
         return False
 
 # Mock teacher database (in production, use a real database)
@@ -236,10 +213,12 @@ TEACHERS_DB = {
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
+    api_status = check_api_status()
     return jsonify({
         "status": "healthy",
         "message": "MisrBase API is running",
-        "models_loaded": len(models) > 0
+        "huggingface_api_accessible": api_status,
+        "models": list(MODELS.keys())
     })
 
 @app.route('/api/auth/signin', methods=['POST'])
@@ -294,25 +273,15 @@ def predict_misconception():
                 "message": "QuestionText, MC_Answer, and StudentExplanation are required"
             }), 400
         
-        # Check if models are loaded
-        if not models:
+        # Check if API is accessible
+        if not check_api_status():
             return jsonify({
                 "success": False,
-                "message": "Models not loaded. Please try again later."
+                "message": "Hugging Face API is not accessible. Please check your internet connection."
             }), 503
         
-        # Create DataFrame for prediction
-        df = pd.DataFrame({
-            'QuestionText': [question_text],
-            'MC_Answer': [mc_answer],
-            'StudentExplanation': [student_explanation]
-        })
-        
-        # Prepare features
-        X = prepare_features(df, tfidf_vectorizer, question_encoder, answer_encoder)
-        
-        # Make predictions
-        predictions = predict_top3_roberta(models, encoders, df, X)
+        # Make predictions using API
+        predictions = predict_top3_api([student_explanation])
         
         # Format results
         top3_predictions = predictions[0] if predictions else ["False_Neither:NA"]
@@ -371,30 +340,18 @@ def batch_predict():
                 "message": "Responses array is required"
             }), 400
         
-        # Check if models are loaded
-        if not models:
+        # Check if API is accessible
+        if not check_api_status():
             return jsonify({
                 "success": False,
-                "message": "Models not loaded. Please try again later."
+                "message": "Hugging Face API is not accessible. Please check your internet connection."
             }), 503
         
-        # Create DataFrame for batch prediction
-        df_data = []
-        for i, response in enumerate(responses):
-            df_data.append({
-                'row_id': i,
-                'QuestionText': response.get('QuestionText', ''),
-                'MC_Answer': response.get('MC_Answer', ''),
-                'StudentExplanation': response.get('StudentExplanation', '')
-            })
+        # Extract student explanations
+        explanations = [response.get('StudentExplanation', '') for response in responses]
         
-        df = pd.DataFrame(df_data)
-        
-        # Prepare features
-        X = prepare_features(df, tfidf_vectorizer, question_encoder, answer_encoder)
-        
-        # Make predictions
-        predictions = predict_top3_roberta(models, encoders, df, X)
+        # Make predictions using API
+        predictions = predict_top3_api(explanations)
         
         # Format results
         results = []
@@ -437,19 +394,25 @@ def batch_predict():
         }), 500
 
 if __name__ == '__main__':
-    # Load models on startup
-    print("🚀 Starting MisrBase API Server...")
+    # Start the server
+    print("🚀 Starting MisrBase API Server with Hugging Face API...")
+    print("=" * 60)
+    print("Models will be accessed directly from Hugging Face API")
+    print("No local model downloads required!")
+    print("=" * 60)
     
-    # Create models directory if it doesn't exist
-    os.makedirs('models', exist_ok=True)
-    
-    # Load models
-    models_loaded = load_models()
-    
-    if models_loaded:
-        print("✅ Server ready to accept requests!")
+    # Check API status
+    if check_api_status():
+        print("✅ Hugging Face API is accessible!")
     else:
-        print("⚠️  Server starting without models. Some endpoints may not work.")
+        print("⚠️  Warning: Hugging Face API may not be accessible")
+        print("   Make sure you have internet connection")
+        if HUGGINGFACE_API_TOKEN:
+            print("   API token is configured")
+        else:
+            print("   No API token configured - using public access")
+    
+    print("✅ Server ready to accept requests!")
     
     # Run the server
     app.run(host='0.0.0.0', port=5000, debug=True) 

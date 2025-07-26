@@ -47,32 +47,49 @@ pip install -r requirements.txt
 
 ### 3. Model Setup
 
-#### Option A: Using Hugging Face Models (Recommended)
+The backend uses Hugging Face's Inference API to access models directly:
 
-1. Upload your trained models to Hugging Face:
-   - Category classification model
-   - Misconception classification model
+#### Using Hugging Face Inference API
 
-2. Update the model names in `config.py` or set environment variables:
-   ```bash
-   export CATEGORY_MODEL_NAME="your-username/misrbase-category-model"
-   export MISCONCEPTION_MODEL_NAME="your-username/misrbase-misconception-model"
+The following models are accessed via API calls:
+- **Category Model**: `MohammedHany123/category_model`
+- **Misconception Model**: `MohammedHany123/misconception_model`  
+- **Correctness Model**: `MohammedHany123/correct_model`
+
+**No local model downloads required!** Models run on Hugging Face's servers.
+
+#### API Token (Optional but Recommended)
+
+For better performance and higher rate limits, get a free API token:
+1. Go to [Hugging Face Settings](https://huggingface.co/settings/tokens)
+2. Create a new token
+3. Add it to your `.env` file:
+   ```env
+   HUGGINGFACE_API_TOKEN=your-token-here
    ```
 
-#### Option B: Using Local Models
+#### Testing API Access
 
-1. Create a `models/` directory:
-   ```bash
-   mkdir models
-   ```
+You can test if the API is accessible by running:
+```bash
+python test_models.py
+```
 
-2. Place your model files in the `models/` directory:
-   - `correctness_model.txt` (LightGBM model)
-   - `category_encoder.joblib`
-   - `misconception_encoder.joblib`
-   - `tfidf_vectorizer.joblib`
-   - `question_encoder.joblib`
-   - `answer_encoder.joblib`
+This will verify that all three models can be accessed via the API.
+
+#### Benefits of API Approach
+
+- ✅ **No local storage required** (no 1.5GB downloads)
+- ✅ **No GPU requirements** (runs on Hugging Face servers)
+- ✅ **Always up-to-date models** (no manual updates)
+- ✅ **Scalable** (handles multiple requests)
+- ✅ **Easy deployment** (minimal dependencies)
+
+#### Requirements
+
+- **Internet connection** required for predictions
+- **API rate limits** apply (higher with token)
+- **Response time** depends on network and model loading
 
 ### 4. Environment Configuration
 
